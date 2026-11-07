@@ -738,6 +738,47 @@ class TTSProvider(TTSProviderBase):
                 logger.bind(tag=TAG).warning(f"取消监听任务错误: {e}")
         self._monitor_task = None
 
+    async def synthesize_clip(self, text, audio_format="mp3"):
+        """独立连接合成整句，供后台试听，不占用设备的对话会话。"""
+        session_id = uuid.uuid4().hex
+        headers = {"X-Api-App-Key": self.appId, "X-Api-Access-Key": self.access_token,
+                   "X-Api-Resource-Id": self.resource_id, "X-Api-Connect-Id": uuid.uuid4().hex}
+        header = Header(message_type=FULL_CLIENT_REQUEST, message_type_specific_flags=MsgTypeFlagWithEvent,
+                        serial_method=JSON).as_bytes()
+        async with websockets.connect(self.ws_url, additional_headers=headers, close_timeout=2) as ws:
+            async def receive():
+                raw = await ws.recv()
+                if not isinstance(raw, bytes) or len(raw) < 4 or raw[1] >> 4 == ERROR_INFORMATION:
+                    raise ValueError("豆包返回错误，请检查凭证和音色权限")
+                reply = self.parser_response(raw)
+                if reply.optional.event in (EVENT_ConnectionFailed, EVENT_SessionFailed, EVENT_SessionCanceled):
+                    raise ValueError("豆包拒绝了本次合成，请检查凭证和音色权限")
+                return reply
+
+            async def send(event, payload, sid=session_id):
+                await self.send_event(ws, header, Optional(event=event, sessionId=sid).as_bytes(), payload)
+
+            await send(EVENT_Start_Connection, b"{}", None)
+            if (await receive()).optional.event != EVENT_ConnectionStarted:
+                raise ValueError("豆包未确认连接")
+            await send(EVENT_StartSession, self.get_payload_bytes(event=EVENT_StartSession, speaker=self.voice,
+                                                                   audio_format=audio_format))
+            if (await receive()).optional.event != EVENT_SessionStarted:
+                raise ValueError("豆包未确认合成会话")
+            await send(EVENT_TaskRequest, self.get_payload_bytes(event=EVENT_TaskRequest, speaker=self.voice,
+                                                                  text=text, audio_format=audio_format))
+            await send(EVENT_FinishSession, b"{}")
+            audio = bytearray()
+            while True:
+                reply = await receive()
+                if reply.optional.event == EVENT_TTSResponse:
+                    audio.extend(reply.payload)
+                elif reply.optional.event == EVENT_SessionFinished:
+                    break
+            if not audio:
+                raise ValueError("豆包没有返回音频")
+            return bytes(audio)
+
     def to_tts(self, text: str) -> list:
         """非流式生成音频数据，用于生成音频及测试场景
         Args:

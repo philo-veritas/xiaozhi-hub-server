@@ -1158,23 +1158,75 @@ function vadCard(v) {
 let audio = null;
 async function renderTTS(root) {
   const d = await api("tts");
-  const isEdge = d.type === "edge";
-  let chosen = d.voice;
+  let provider = d.provider === "doubao" ? "doubao" : "edge";
+  let chosen = d.edge_voice;
+  const speakers = [
+    ["小何", "zh_female_xiaohe_uranus_bigtts"], ["Vivi", "zh_female_vv_uranus_bigtts"],
+    ["云舟", "zh_male_m191_uranus_bigtts"], ["小天", "zh_male_taocheng_uranus_bigtts"],
+    ["知性灿灿", "zh_female_cancan_uranus_bigtts"], ["温暖阿虎", "zh_male_wennuanahu_uranus_bigtts"]
+  ];
+  const speakerName = speakers.find(([, id]) => id === d.doubao.speaker)?.[0];
+
   const groups = [];
   d.voices.forEach((v) => { let g = groups.find((x) => x.name === v.group); if (!g) groups.push(g = { name: v.group, items: [] }); g.items.push(v); });
   const cur = d.voices.find((v) => v.value === d.voice);
   root.innerHTML = `
-    <div class="page-head"><div><h1>语音合成</h1><p class="sub">把回复转成语音。EdgeTTS 免费、不需要 Key，换音色不用下载任何文件。</p></div>
-      <span class="pill ok">当前：${esc(d.selected)}${cur ? ` · ${esc(cur.name)}` : ""}</span></div>
-    ${isEdge ? "" : `<div class="banner warn">当前使用的是 ${esc(d.selected)}，后台只支持设置 EdgeTTS 的音色。</div>`}
-    <div class="card panel ${isEdge ? "" : "disabled-area"}">
+    <div class="page-head"><div><h1>语音合成</h1><p class="sub">选择朗读回复的服务和音色。可以先试听，再保存并使用。</p></div>
+      <span class="pill ok">当前：${esc(d.provider === "doubao" ? "豆包 · " + (speakerName || d.doubao.speaker) : d.selected)}${cur ? ` · ${esc(cur.name)}` : ""}</span></div>
+    <div class="choices">
+      <button class="choice" data-tts="edge"><div><b>EdgeTTS</b><small>微软在线语音，无需密钥</small></div></button>
+      <button class="choice" data-tts="doubao"><div><b>豆包语音合成 2.0</b><small>使用火山引擎账户的音色和额度</small></div></button>
+    </div>
+    <div class="card panel" id="edge-panel">
       ${groups.map((g) => `<div class="voice-group"><h3>${esc(g.name)}</h3><div class="voices">${g.items.map((v) => `
         <div class="voice ${v.value === chosen ? "on" : ""}" data-voice="${esc(v.value)}" role="button" tabindex="0">
           <div class="meta"><b>${esc(v.name)}</b> <span class="muted small">${esc(v.gender)}</span><small>${esc(v.style)}</small></div>
           <button class="play" data-play="${esc(v.value)}" title="试听">▶</button></div>`).join("")}</div></div>`).join("")}
-      <div class="actions"><span class="result muted">保存后，设备重新连接时生效。</span>
-        <button class="btn primary" id="tts-save">保存音色</button></div>
-    </div>`;
+    </div>
+    <div class="card panel" id="doubao-panel">
+      <div class="fields">
+        <label class="f">App ID<input class="in" id="tts-appid" autocomplete="off" placeholder="${d.doubao.appid_set ? "已设置，留空沿用" : "语音合成服务的 App ID"}"></label>
+        <label class="f">Access Token<input class="in" id="tts-token" type="password" autocomplete="new-password" placeholder="${d.doubao.token_set ? "已设置，留空沿用" : "语音合成服务的 Access Token"}"></label>
+        <label class="f full">豆包音色<select class="in" id="tts-preset">
+          ${speakers.map(([name, id]) => `<option value="${id}" ${id === d.doubao.speaker ? "selected" : ""}>${name}</option>`).join("")}
+          <option value="" ${speakerName ? "" : "selected"}>自定义音色 ID</option></select></label>
+        <label class="f full ${speakerName ? "hidden" : ""}" id="tts-custom">自定义音色 ID<input class="in" id="tts-speaker" value="${esc(d.doubao.speaker)}"></label>
+      </div>
+      <button class="btn" id="tts-preview">试听豆包音色</button>
+    </div>
+    <div class="actions"><span class="result muted">保存后，对话在设备重新连接时生效；ThinkSmart 会自动同步唤醒回应。</span>
+      <button class="btn primary" id="tts-save">保存并使用</button></div>`;
+  const show = () => {
+    $("edge-panel").classList.toggle("hidden", provider !== "edge");
+    $("doubao-panel").classList.toggle("hidden", provider !== "doubao");
+    root.querySelectorAll("[data-tts]").forEach((b) => b.classList.toggle("on", b.dataset.tts === provider));
+  };
+  root.querySelectorAll("[data-tts]").forEach((b) => b.onclick = () => {
+    provider = b.dataset.tts;
+    if (audio) { audio.pause(); audio = null; }
+    resetPlay(); show();
+  });
+  show();
+  $("tts-preset").onchange = () => $("tts-custom").classList.toggle("hidden", !!$("tts-preset").value);
+  const speaker = () => $("tts-preset").value || $("tts-speaker").value.trim();
+  const doubao = () => ({ provider: "doubao", appid: $("tts-appid").value.trim(),
+                          access_token: $("tts-token").value.trim(), speaker: speaker() });
+  $("tts-preview").onclick = (e) => busy(e.target, async () => {
+    const button = e.target;
+    try {
+      if (audio) { audio.pause(); audio = null; }
+      const r = await fetch("/admin/api/tts/preview", { method: "POST", headers: { "Content-Type": "application/json" },
+                                                        body: JSON.stringify(doubao()) });
+      if (!r.ok) throw new Error((await r.json()).error || "试听失败");
+      const blob = await r.blob();
+      if (!button.isConnected || provider !== "doubao") return;
+      const url = URL.createObjectURL(blob);
+      const a = audio = new Audio(url);
+      const release = () => URL.revokeObjectURL(url);
+      a.onended = a.onpause = a.onerror = release;
+      try { await a.play(); } catch (err) { release(); throw err; }
+    } catch (err) { toast(err.message, true); }
+  });
   const pick = (el) => { chosen = el.dataset.voice; root.querySelectorAll(".voice").forEach((x) => x.classList.toggle("on", x === el)); };
   root.querySelectorAll(".voice").forEach((el) => {
     el.onclick = (e) => { if (!e.target.closest(".play")) pick(el); };
@@ -1193,9 +1245,10 @@ async function renderTTS(root) {
     a.onerror = () => { resetPlay(); toast("试听失败，请检查电脑能否访问微软的语音服务", true); };
     a.play().catch(() => {});
   }));
-  page.dirty = () => chosen !== d.voice;
+  page.dirty = () => provider !== d.provider || chosen !== d.edge_voice || $("tts-appid").value ||
+                     $("tts-token").value || speaker() !== d.doubao.speaker;
   $("tts-save").onclick = (e) => busy(e.target, async () => {
-    try { const r = await api("tts", { voice: chosen }); toast(r.changed.length ? r.note : "没有修改", r.failed); page.dirty = null; await openPage("tts", true); }
+    try { const r = await api("tts", provider === "edge" ? { provider, voice: chosen } : doubao()); toast(r.changed.length ? r.note : "没有修改", r.failed); page.dirty = null; await openPage("tts", true); }
     catch (err) { toast(err.message, true); }
   });
 }

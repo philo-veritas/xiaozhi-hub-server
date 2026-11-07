@@ -5,6 +5,8 @@
 所有函数只读写配置文件，不碰运行中的服务；热加载由 AdminHandler 负责。
 """
 
+import hashlib
+import json
 import re
 from pathlib import Path
 
@@ -710,13 +712,86 @@ def save_vad_silence(raw, merged: dict, path: Path = None):
 
 # ---------- 语音合成 ----------
 
+DOUBAO_TTS = "HuoshanDoubleStreamTTSV2"
+DOUBAO_WS = "wss://openspeech.bytedance.com/api/v3/tts/bidirection"
+
+
+def tts_voice_key(config):
+    """设备端短句缓存的音色标识。只取影响合成的字段，不含账号或凭证。"""
+    name = _selected(config, "TTS")
+    entry = _entry(config, "TTS", name)
+    fields = ("type", "voice", "speaker", "private_voice", "resource_id", "model", "format",
+              "rate", "volume", "pitch", "ttsVolume", "ttsRate", "ttsPitch", "audio_params",
+              "additions", "mix_speaker", "cluster")
+    settings = [name, {key: entry[key] for key in fields if key in entry}]
+    return hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()
+
+
+def _edge_name(merged):
+    name = _selected(merged, "TTS")
+    return name if _entry(merged, "TTS", name).get("type") == "edge" else "EdgeTTS"
+
+
+def doubao_tts_settings(merged, body):
+    entry = _entry(merged, "TTS", DOUBAO_TTS)
+    if (entry.get("type") != "huoshan_double_stream" or entry.get("resource_id") != "seed-tts-2.0"
+            or entry.get("ws_url") != DOUBAO_WS):
+        raise ValueError("缺少标准豆包语音合成 2.0 配置，或该条目使用了自定义接口")
+    fields = {}
+    for key, label in (("appid", "App ID"), ("access_token", "Access Token"), ("speaker", "音色 ID")):
+        value = str(body.get(key) or "").strip() or _text((entry.get("private_voice") if key == "speaker" else None) or entry.get(key))
+        if not value or len(value) > 512 or not value.isascii() or any(not 33 <= ord(c) <= 126 for c in value):
+            raise ValueError(f"请填写有效的{label}")
+        fields[key] = value
+    if entry.get("private_voice") and entry["private_voice"] != fields["speaker"]:
+        fields["private_voice"] = ""  # 显式选择的新音色优先于旧配置中的覆盖值
+    return {**entry, **fields}
+
+
+def use_tts(merged, body, path=None):
+    # 保留旧前端只提交 voice 的行为。
+    provider = body.get("provider")
+    if provider is None:
+        return save_tts_voice(str(body.get("voice") or ""), merged, path)
+    if provider == "doubao":
+        name = DOUBAO_TTS
+        entry = doubao_tts_settings(merged, body)
+        values = {key: entry[key] for key in ("appid", "access_token", "speaker", "private_voice") if key in entry}
+    elif provider == "edge":
+        name = _edge_name(merged)
+        entry = _entry(merged, "TTS", name)
+        voice = body.get("voice") or entry.get("voice")
+        if entry.get("type") != "edge" or voice not in catalog.EDGE_VOICE_VALUES:
+            raise ValueError("不支持这个 EdgeTTS 音色")
+        values = {"voice": voice}
+    else:
+        raise ValueError("未知语音合成服务")
+    changed = [k for k, v in values.items() if v != _entry(merged, "TTS", name).get(k)]
+    switch = name != _selected(merged, "TTS")
+    if changed or switch:
+        with config_store.edit_custom(path) as data:
+            if changed:
+                target = data.setdefault("TTS", CommentedMap()).setdefault(name, CommentedMap())
+                target.update({k: values[k] for k in changed})
+            if switch:
+                data.setdefault("selected_module", CommentedMap())["TTS"] = name
+                changed.append("selected_module")
+    return changed
+
+
 def describe_tts(merged: dict) -> dict:
     name = _selected(merged, "TTS")
     entry = _entry(merged, "TTS", name)
+    db = _entry(merged, "TTS", DOUBAO_TTS)
     return {
         "selected": name,
         "type": entry.get("type", name),
         "voice": str(entry.get("voice") or ""),
+        "provider": "edge" if entry.get("type") == "edge" else "doubao" if name == DOUBAO_TTS else "other",
+        "edge_voice": _entry(merged, "TTS", _edge_name(merged)).get("voice", ""),
+        "doubao": {"speaker": db.get("private_voice") or db.get("speaker", ""),
+                   "appid_set": bool(_text(db.get("appid"))),
+                   "token_set": bool(_text(db.get("access_token")))},
         "voices": catalog.EDGE_VOICES,
     }
 

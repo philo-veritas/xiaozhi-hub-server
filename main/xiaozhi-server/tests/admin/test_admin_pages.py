@@ -12,6 +12,7 @@ from core.admin import catalog, config_store, connections, pages
 from core.admin import admin_handler as ah
 from core.agent import llm_router, reports
 from core.providers.asr import doubao_stream
+from core.providers.tts.huoshan_double_stream import TTSProvider as DoubaoTTS
 
 CUSTOM_YAML = """\
 selected_module:
@@ -174,6 +175,32 @@ def test_save_tts_voice(cfg_path):
         pages.save_tts_voice("en-US-AvaNeural", merged(cfg_path), cfg_path)
     assert pages.save_tts_voice("zh-CN-YunxiNeural", merged(cfg_path), cfg_path) == ["voice"]
     assert merged(cfg_path)["TTS"]["EdgeTTS"]["voice"] == "zh-CN-YunxiNeural"
+
+
+async def test_tts_switch_preserves_credentials_and_preview_is_read_only(client, cfg_path, monkeypatch):
+    url = "/admin/api/tts"
+    original = cfg_path.read_bytes()
+    assert (await client.post(url, json={"provider": "doubao"})).status == 400
+    assert cfg_path.read_bytes() == original
+    credentials = {"provider": "doubao", "appid": "12345", "access_token": "dummy-access-token"}
+
+    async def sample(provider, text):
+        assert provider.appId == credentials["appid"] and provider.access_token == credentials["access_token"]
+        return b"mp3-test"
+    monkeypatch.setattr(DoubaoTTS, "synthesize_clip", sample)
+    preview = await client.post(url + "/preview", json=credentials)
+    assert preview.content_type == "audio/mpeg" and await preview.read() == b"mp3-test"
+    assert cfg_path.read_bytes() == original
+
+    for body, name in ((credentials, pages.DOUBAO_TTS), ({"provider": "edge"}, "EdgeTTS"),
+                       ({"provider": "doubao", "access_token": ""}, pages.DOUBAO_TTS)):
+        assert (await client.post(url, json=body)).status == 200
+        assert client.handler.config["selected_module"]["TTS"] == merged(cfg_path)["selected_module"]["TTS"] == name
+    description = await (await client.get(url)).json()
+    assert description["doubao"]["token_set"] and credentials["access_token"] not in str(description)
+    assert (await client.post(url + "/preview", json={})).status == 200
+    await client.post("/admin/api/logout", json={})
+    assert (await client.post(url + "/preview", json={})).status == 401
 
 
 def test_save_vad_silence(cfg_path):

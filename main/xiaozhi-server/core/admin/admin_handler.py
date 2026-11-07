@@ -84,6 +84,7 @@ class AdminHandler:
             logger.bind(tag=TAG).info("更新网关后沿用了更新前的后台登录")
         self.updater = gateway_updater or updater.Updater()
         self._emotion_runs = {}  # session_id -> {"task", "index", "total", "emotion"}
+        self._tts_save_lock = asyncio.Lock()
         self._voice_samples = {}  # 音色 -> mp3 字节（试听缓存）
         self.logger = logger
         self.grokbot = GrokBotAdmin(grokbot_credentials, logger=logger.bind(tag=TAG))
@@ -122,6 +123,7 @@ class AdminHandler:
                 web.post("/admin/api/asr/corrections", self.handle_corrections_save),
                 web.get("/admin/api/tts", self.handle_tts),
                 web.post("/admin/api/tts", self.handle_tts_save),
+                web.post("/admin/api/tts/preview", self.handle_doubao_tts_preview),
                 web.get("/admin/api/tts/preview", self.handle_tts_preview),
                 web.get("/admin/api/intent", self.handle_intent),
                 web.post("/admin/api/intent", self.handle_intent_save),
@@ -760,7 +762,10 @@ class AdminHandler:
             return self._error("缺少 device", 400)
         reports.set_quiet(device, bool(body.get("quiet")))
         playing = bool(body.get("play")) and reports.deliver_now(device)
-        return self._json({"ok": True, "count": reports.count(device), "playing": playing})
+        result = {"ok": True, "count": reports.count(device), "playing": playing}
+        if body.get("wake_voice"):
+            result["wake_voice"] = pages.tts_voice_key(self.config)
+        return self._json(result)
 
     async def handle_kiosk_asr(self, request: web.Request):
         """只识别、不对话：body 是 10 秒以内的 16kHz 单声道 16 位 PCM，返回 {"text", "ms"}。
@@ -791,9 +796,12 @@ class AdminHandler:
         text = str(body.get("text") or "").strip()
         if not text or len(text) > KIOSK_TTS_MAX_CHARS:
             return self._error(f"text 要 1 到 {KIOSK_TTS_MAX_CHARS} 个字", 400)
+        config = dict(self.config)  # 切换 TTS 会整体替换配置段，保留与本次音色标识对应的快照。
+        if "voice_key" in body and body["voice_key"] != pages.tts_voice_key(config):
+            return self._error("音色已切换，请重新同步", 409)
         started = time.monotonic()
         try:
-            pcm = await self._blocking(self._synthesize, text)
+            pcm = await self._blocking(self._synthesize, text, config)
         except NotImplementedError:
             return self._error("当前语音合成不支持整句合成", 501)
         except Exception as e:
@@ -804,11 +812,15 @@ class AdminHandler:
         self.logger.bind(tag=TAG).info(f"/kiosk/tts 合成 {len(text)} 字，用时 {time.monotonic() - started:.1f}s")
         return web.Response(body=_wav(pcm, KIOSK_TTS_RATE), content_type="audio/wav", headers=SECURITY_HEADERS)
 
-    def _synthesize(self, text: str) -> bytes:
+    def _synthesize(self, text: str, config: dict) -> bytes:
         from core.providers.tts.dto.dto import InterfaceType
+        from core.providers.tts.huoshan_double_stream import TTSProvider as DoubaoTTS
         from core.utils.modules_initialize import initialize_tts
 
-        tts = initialize_tts(self.config)
+        tts = initialize_tts(config)
+        if isinstance(tts, DoubaoTTS):
+            tts.audio_params["sample_rate"] = KIOSK_TTS_RATE
+            return asyncio.run(asyncio.wait_for(tts.synthesize_clip(text, "pcm"), 20))
         if tts.interface_type != InterfaceType.NON_STREAM:
             raise NotImplementedError
         return tts.synthesize_pcm(text, KIOSK_TTS_RATE)
@@ -991,14 +1003,29 @@ class AdminHandler:
     async def handle_tts_save(self, request: web.Request):
         self._require_login(request)
         body = await self._read_json(request)
-        try:
+        async with self._tts_save_lock:
             merged = await self._blocking(self._merged)
-            changed = await self._blocking(pages.save_tts_voice, str(body.get("voice") or ""), merged, self.config_path)
+            try:
+                changed = await self._blocking(pages.use_tts, merged, body, self.config_path)
+            except ValueError as e:
+                return self._error(str(e), 400)
+            result = await self._apply("TTS") if changed else {"applied": True, "note": "没有修改"}
+        return self._json({"ok": True, "changed": changed, **result})
+
+    async def handle_doubao_tts_preview(self, request: web.Request):
+        self._require_login(request)
+        body = await self._read_json(request)
+        try:
+            entry = pages.doubao_tts_settings(await self._blocking(self._merged), body)
         except ValueError as e:
             return self._error(str(e), 400)
-        name = (merged.get("selected_module") or {}).get("TTS")
-        self.logger.bind(tag=TAG).info(f"管理后台更新了音色: {body.get('voice')}")
-        return self._json({"ok": True, "changed": changed, **await self._apply_if_selected("TTS", name, changed)})
+        try:
+            from core.providers.tts.huoshan_double_stream import TTSProvider
+
+            audio = await asyncio.wait_for(TTSProvider(entry, True).synthesize_clip("你好，这是豆包语音测试。"), 20)
+        except Exception:
+            return self._error("豆包试听失败，请检查网络、语音合成凭证和音色权限", 502)
+        return web.Response(body=audio, content_type="audio/mpeg", headers=SECURITY_HEADERS)
 
     async def handle_tts_preview(self, request: web.Request):
         """用 EdgeTTS 合成一句示例，返回 mp3 给浏览器播放。"""
