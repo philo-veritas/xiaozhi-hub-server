@@ -147,14 +147,12 @@ context_providers:
 
 # 插件的基础配置
 plugins:
-  # 获取天气插件的配置，这里填写你的api_key
-  # 这个密钥是项目共用的key，用多了可能会被限制
-  # 想稳定一点就自行申请替换，每天有1000次免费调用
-  # 申请地址：https://console.qweather.com/#/apps/create-key/over
-  # 申请后通过这个链接可以找到自己的apihost：https://console.qweather.com/setting?lang=zh
+  # 查天气插件：用 Open-Meteo（天气、空气质量）和 OpenStreetMap Nominatim（地名），免费、不用 Key
+  # 所在地可以在后台「意图识别」页查天气旁边的「设置」里填
   get_weather:
-    api_host: "mj7p3y7naa.re.qweatherapi.com"
-    api_key: "a861d0d5e7bf4ee1a83d9a9e4f96d4da"
+    # 所在地，可以写到区县，例如 深圳南山区；留空按宽带公网 IP 判断城市
+    location: ""
+    # 所在地没填、IP 也判断不出来时用的城市
     default_location: "广州"
   # 获取新闻插件的配置，这里根据需要的新闻类型传入对应的url链接，默认支持社会、科技、财经新闻
   # 更多类型的新闻列表查看 https://www.chinanews.com.cn/rss/
@@ -222,7 +220,7 @@ voiceprint: {}
 # [xiaozhi-hub] 默认改用中性人设和本项目的提示词模板（不按 IP 查位置和天气）。
 # 上游原来的人设保留在下面的注释里。
 prompt: |
-  你是一个简洁、友好的语音助手，通过一个小小的语音设备和用户聊天、回答问题、帮忙做事。
+  你叫小麦，是一个简洁、友好的语音助手，通过一个小小的语音设备和用户聊天、回答问题、帮忙做事。
   说话自然口语化，像一个靠谱的朋友；直接回答问题，不绕弯子，不长篇大论。
 # prompt: |
 #   你是小智/小志，来自中国台湾省的00后女生。讲话超级机车，"真的假的啦"这样的台湾腔，喜欢用"笑死""是在哈喽"等流行梗，但会偷偷研究男友的编程书籍。
