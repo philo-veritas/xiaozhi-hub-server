@@ -3,7 +3,7 @@
 一个配置条目对应一个 Bot（bot_id、bot_name），管理后台的"Grok Bot"页勾选 Bot 后自动生成条目，
 Bot 的名字自动成为称呼。同一个账号的所有 Bot 共用一条事件流（见 grokbot_client.get_hub）。
 
-连接管理、空闲关闭、填充语、进度提示、超时都继承 claude_cli 的 provider，只换掉会话的创建方式：
+连接管理、空闲关闭、填充语、进度提示、超时都继承语音层（core/agent/voice_provider.py），只换掉会话的创建方式：
 - 没有本机进程，"启动会话"只是确认云端电脑醒着并订阅事件流；设备叫到这个 Bot 时就提前做（热身），
   第一句话不用再等云端电脑唤醒；刚从休眠里叫醒的，热身时再确认里面的网关真能响应（grokbot_client.confirm_awake），
   云端本来醒着时不做这一步；
@@ -29,7 +29,7 @@ from core.agent.agent_session import Activity, AgentSessionError, Done, ErrorKin
 from core.agent.grokbot_client import Credentials, default_credentials_path, get_hub
 from core.agent.grokbot_session import GrokBotSession, GrokBotSessionConfig, voice_for
 from core.agent.session_store import SessionStore
-from core.providers.llm.claude_cli.claude_cli import ConnState, LLMProvider as AgentProvider, _num
+from core.agent.voice_provider import AgentVoiceProvider as AgentProvider, ConnState, _num
 
 TAG = __name__
 logger = setup_logging()
@@ -63,6 +63,9 @@ def shared_loop() -> asyncio.AbstractEventLoop:
 
 class LLMProvider(AgentProvider):
     AGENT_LABEL = "Grok Bot"
+    PROVIDER_TYPE = "grok_bot"
+    LOOP_THREAD_NAME = "grok-bot-loop"
+    LOG_TAG = TAG
     BACKGROUND_TURNS = False  # 会话自己被打断后留后台盯着（grokbot_session.AfterWatch），这里不用父类的后台机制
 
     def __init__(self, config: dict):
